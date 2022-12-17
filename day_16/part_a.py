@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 
 from __future__ import annotations
-import itertools
 import sys
-import re
 from dataclasses import dataclass
-from typing import List, Set
-from collections import defaultdict
+from typing import List, Set, Dict
 
-from aws_cdk.aws_stepfunctions import Map
+TIME_TO_COMPLETE = 30
 
 
 @dataclass
@@ -16,13 +13,15 @@ class Valve:
     name: str
     flow_rate: int
     linked_valves: List[Valve]
+    valve_time_to_turn_on: Dict[Valve, int]
 
     def __hash__(self):
-        return hash(self.name)
+        return id(self)
+
 
 def read_valves() -> List[Valve]:
-    valves = {}
-    valve_linkages: Map[str, Valve] = {}
+    valves: Dict[str, Valve] = {}
+    valve_linkages: Dict[str, List[str]] = {}
     while True:
         line = sys.stdin.readline().strip('\n')
         if not line:
@@ -40,6 +39,7 @@ def read_valves() -> List[Valve]:
             name=valve_name,
             flow_rate=flow_rate,
             linked_valves=None,
+            valve_time_to_turn_on=None,
         )
         valve_linkages[valve_name] = linked_valve_names
 
@@ -48,75 +48,69 @@ def read_valves() -> List[Valve]:
         linked_valves = [valves[valve_name] for valve_name in linked_valves]
         valve.linked_valves = linked_valves
 
-    valves = list(valves.values())
+    valves: List[Valve] = list(valves.values())
     valves.sort(key=lambda v: v.name)
     return valves
 
 
+def populate_flow_valve_distances(valves: Set[Valve]):
+    for valve in [v for v in valves if v.name == 'AA' or v.flow_rate > 0]:
+        visited_valves = {valve, }
+        starting_valves = {valve, }
+        valve_time_to_turn_on = {}
+        distance = 0
+        while True:
+            distance += 1
+            next_valves = set()
+            for v in starting_valves:
+                for n in v.linked_valves:
+                    if n not in visited_valves:
+                        next_valves.add(n)
+                        visited_valves.add(n)
+            if not next_valves:
+                break
+            for n in next_valves:
+                if n.flow_rate > 0:
+                    valve_time_to_turn_on[n] = distance + 1
+            starting_valves = next_valves
+        valve.valve_time_to_turn_on = valve_time_to_turn_on
+
+
 def max_flow_for_given_minute(
         current_valve: Valve,
-        all_openable_valves: Set[Valve],
-        candidate_openable_valves: Set[Valve],
-        visited_since_last_opening: Set[Valve],
+        candidate_valves: Set[Valve],
         open_valves: Set[Valve],
         minute: int) -> int:
     flow_for_this_minute = sum([valve.flow_rate for valve in open_valves])
-    if minute == 30:
-        return flow_for_this_minute
 
-    flow_with_no_more_openings = flow_for_this_minute * (31 - minute)
-    if not candidate_openable_valves:
-        return flow_with_no_more_openings
+    max_flow_from_this_minute_onward = flow_for_this_minute * (TIME_TO_COMPLETE + 1 - minute)
 
-    candidate_max_flows_from_this_minute_onward = [flow_with_no_more_openings]
+    for next_valve in candidate_valves:
+        valve_time_to_turn_on = current_valve.valve_time_to_turn_on[next_valve]
+        if minute + valve_time_to_turn_on > TIME_TO_COMPLETE:
+            continue
 
-    if current_valve.flow_rate > 0 and current_valve not in open_valves:
-        flow_for_subsequent_minutes_with_valve_open = max_flow_for_given_minute(
-            current_valve=current_valve,
-            all_openable_valves=all_openable_valves,
-            candidate_openable_valves=candidate_openable_valves - {current_valve, },
-            visited_since_last_opening=set(),
-            open_valves=open_valves | {current_valve, },
-            minute=minute + 1,
+        max_flow_after_valve_open = max_flow_for_given_minute(
+            current_valve=next_valve,
+            candidate_valves=candidate_valves - {next_valve, },
+            open_valves=open_valves | {next_valve, },
+            minute=minute + valve_time_to_turn_on
         )
-        candidate_max_flows_from_this_minute_onward = [
-            flow_for_this_minute + flow_for_subsequent_minutes_with_valve_open,
-        ]
-        max_openable_flow_rate = max([valve.flow_rate for valve in candidate_openable_valves])
-        if max_openable_flow_rate < (current_valve.flow_rate * 2):
-            # Optimisation - we know we get more flow rate opening this now than opening any other valve sooner.
-            return candidate_max_flows_from_this_minute_onward[0]
-
-    flow_for_subsequent_minutes_for_each_linked_valve = [
-        max_flow_for_given_minute(
-            current_valve=next_value,
-            all_openable_valves=all_openable_valves,
-            candidate_openable_valves=candidate_openable_valves,
-            visited_since_last_opening=visited_since_last_opening | {next_value, },
-            open_valves=open_valves,
-            minute=minute + 1,
+        max_flow_from_this_minute_onward = max(
+            max_flow_from_this_minute_onward,
+            flow_for_this_minute * valve_time_to_turn_on + max_flow_after_valve_open,
         )
-        for next_value
-        in current_valve.linked_valves
-        if next_value not in visited_since_last_opening
-    ]
 
-    candidate_max_flows_from_this_minute_onward += [
-        flow_for_this_minute + subsequent_flow
-        for subsequent_flow
-        in flow_for_subsequent_minutes_for_each_linked_valve
-    ]
-
-    return max(candidate_max_flows_from_this_minute_onward)
+    return max_flow_from_this_minute_onward
 
 
 def main():
     valves = read_valves()
+    populate_flow_valve_distances(set(valves))
+    candidate_valves = set(valves[0].valve_time_to_turn_on.keys())
     max_flow_rate = max_flow_for_given_minute(
         current_valve=valves[0],
-        all_openable_valves=set([v for v in valves if v.flow_rate > 0]),
-        candidate_openable_valves=set([v for v in valves if v.flow_rate > 0]),
-        visited_since_last_opening=set(),
+        candidate_valves=candidate_valves,
         open_valves=set(),
         minute=1,
     )
@@ -124,4 +118,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    import cProfile
+    import re
+
+    cProfile.run('main()')
+    # main()
